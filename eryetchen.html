@@ -1,0 +1,490 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>陳偉洺 ∩ ERYETCHEN — Path Intersections</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #1a1a1a; overflow: hidden; font-family: system-ui, sans-serif; cursor: none; }
+    canvas { display: block; position: fixed; inset: 0; width: 100vw !important; height: 100vh !important; }
+    #hint { position: fixed; top: 10px; left: 12px; color: #aaa; font-size: 13px; pointer-events: none; z-index: 10; }
+    #err {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      color: #f88; font: 12px/1.4 monospace; padding: 8px;
+      white-space: pre-wrap; background: rgba(40,0,0,0.9);
+      max-height: 240px; overflow: auto; z-index: 100;
+    }
+    #err:empty { display: none; }
+  </style>
+</head>
+<body>
+  <div id="hint">Move your mouse — red dots mark where ERYETCHEN crosses 陳偉洺.</div>
+  <div id="err"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js"></script>
+
+  <script type="module">
+    const errEl = document.getElementById('err');
+    const showErr = msg => { errEl.textContent += msg + '\n'; console.error(msg); };
+    window.addEventListener('error', e => showErr('Error: ' + (e.message || e.error)));
+    window.addEventListener('unhandledrejection', e => showErr('Rejection: ' + (e.reason?.stack || e.reason)));
+
+    try {
+      if (!window.PIXI) throw new Error('PIXI not loaded');
+      const { Application, Graphics, Container } = window.PIXI;
+
+      const bjMod = await import('https://cdn.jsdelivr.net/npm/bezier-js@6.1.4/+esm');
+      const Bezier = bjMod.Bezier || bjMod.default?.Bezier || bjMod.default;
+      if (typeof Bezier !== 'function') throw new Error('Bezier not found');
+
+      const otMod = await import('https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/+esm');
+      const opentype = otMod.default || otMod;
+      const fontUrl = 'https://cdn.jsdelivr.net/gh/opentypejs/opentype.js/fonts/Roboto-Black.ttf';
+      const font = await new Promise((res, rej) => {
+        opentype.load(fontUrl, (err, f) => err ? rej(err) : res(f));
+      });
+
+      // ---- Fetch and parse SVG ----
+      const svgText = await (await fetch('./chen-name.svg')).text();
+      const svgDoc = new DOMParser().parseFromString(svgText, 'image/svg+xml');
+      const parseError = svgDoc.querySelector('parsererror');
+      if (parseError) throw new Error('SVG parse error: ' + parseError.textContent);
+
+      const vb = svgDoc.documentElement.getAttribute('viewBox').split(/\s+/).map(Number);
+      const [vbX, vbY, vbW, vbH] = vb;
+
+      function parsePath(d) {
+        const tokens = d.match(/[MmCcLlHhVvZzQqTtAaSs]|-?[\d.]+(?:[eE][+-]?\d+)?/g) || [];
+        const segments = [];
+        let i = 0, cx = 0, cy = 0, sx = 0, sy = 0, cmd = null;
+        const num = () => +tokens[i++];
+        while (i < tokens.length) {
+          const t = tokens[i];
+          if (/[A-Za-z]/.test(t)) {
+            cmd = t;
+            i++;
+            if (cmd === 'Z' || cmd === 'z') {
+              segments.push({ type: 'Z', fromX: cx, fromY: cy, toX: sx, toY: sy });
+              cx = sx; cy = sy;
+              cmd = null;
+            }
+            continue;
+          }
+          if (cmd === 'M') {
+            cx = num(); cy = num();
+            sx = cx; sy = cy;
+            segments.push({ type: 'M', x: cx, y: cy });
+            cmd = 'L'; // implicit
+          } else if (cmd === 'm') {
+            cx += num(); cy += num();
+            sx = cx; sy = cy;
+            segments.push({ type: 'M', x: cx, y: cy });
+            cmd = 'l';
+          } else if (cmd === 'L') {
+            const x = num(), y = num();
+            segments.push({ type: 'L', x, y, fromX: cx, fromY: cy });
+            cx = x; cy = y;
+          } else if (cmd === 'l') {
+            const x = cx + num(), y = cy + num();
+            segments.push({ type: 'L', x, y, fromX: cx, fromY: cy });
+            cx = x; cy = y;
+          } else if (cmd === 'C') {
+            const x1 = num(), y1 = num();
+            const x2 = num(), y2 = num();
+            const x = num(), y = num();
+            segments.push({ type: 'C', x1, y1, x2, y2, x, y, fromX: cx, fromY: cy });
+            cx = x; cy = y;
+          } else if (cmd === 'c') {
+            const x1 = cx + num(), y1 = cy + num();
+            const x2 = cx + num(), y2 = cy + num();
+            const x = cx + num(), y = cy + num();
+            segments.push({ type: 'C', x1, y1, x2, y2, x, y, fromX: cx, fromY: cy });
+            cx = x; cy = y;
+          } else {
+            i++; // unsupported, skip token
+          }
+        }
+        return segments;
+      }
+
+      function getGroupTranslate(el) {
+        let tx = 0, ty = 0;
+        let g = el.parentElement;
+        while (g && g.tagName.toLowerCase() === 'g') {
+          const tr = g.getAttribute('transform');
+          const m = tr && tr.match(/translate\(\s*(-?[\d.]+)\s*[,\s]\s*(-?[\d.]+)\s*\)/);
+          if (m) { tx += parseFloat(m[1]); ty += parseFloat(m[2]); }
+          g = g.parentElement;
+        }
+        return { tx, ty };
+      }
+
+      // Build SVG beziers + render ops in viewBox-local space.
+      const svgBeziers = [];
+      const svgOps = [];
+      for (const pathEl of svgDoc.querySelectorAll('path')) {
+        const d = pathEl.getAttribute('d');
+        if (!d) continue;
+        const { tx, ty } = getGroupTranslate(pathEl);
+        const segs = parsePath(d);
+        for (const s of segs) {
+          if (s.type === 'M') {
+            svgOps.push({ type: 'M', x: s.x + tx, y: s.y + ty });
+          } else if (s.type === 'C') {
+            const fx = s.fromX + tx, fy = s.fromY + ty;
+            const x1 = s.x1 + tx, y1 = s.y1 + ty;
+            const x2 = s.x2 + tx, y2 = s.y2 + ty;
+            const x = s.x + tx, y = s.y + ty;
+            svgBeziers.push(new Bezier(fx, fy, x1, y1, x2, y2, x, y));
+            svgOps.push({ type: 'C', x1, y1, x2, y2, x, y });
+          } else if (s.type === 'L') {
+            const fx = s.fromX + tx, fy = s.fromY + ty;
+            const x = s.x + tx, y = s.y + ty;
+            const mx = (fx + x) / 2, my = (fy + y) / 2;
+            svgBeziers.push(new Bezier(fx, fy, mx, my, x, y));
+            svgOps.push({ type: 'L', x, y });
+          } else if (s.type === 'Z') {
+            const fx = s.fromX + tx, fy = s.fromY + ty;
+            const ex = s.toX + tx, ey = s.toY + ty;
+            if (fx !== ex || fy !== ey) {
+              const mx = (fx + ex) / 2, my = (fy + ey) / 2;
+              svgBeziers.push(new Bezier(fx, fy, mx, my, ex, ey));
+            }
+            svgOps.push({ type: 'Z' });
+          }
+        }
+      }
+      console.log('SVG: parsed', svgBeziers.length, 'bezier segments');
+
+      // ---- Build text -> beziers + ops ----
+      function processText(text, fontSize) {
+        const path = font.getPath(text, 0, 0, fontSize);
+        const beziers = [];
+        const ops = [];
+        let cx = 0, cy = 0, sx = 0, sy = 0;
+        for (const cmd of path.commands) {
+          if (cmd.type === 'M') {
+            cx = sx = cmd.x; cy = sy = cmd.y;
+            ops.push(cmd);
+          } else if (cmd.type === 'L') {
+            const mx = (cx + cmd.x) / 2, my = (cy + cmd.y) / 2;
+            beziers.push(new Bezier(cx, cy, mx, my, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'C') {
+            beziers.push(new Bezier(cx, cy, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'Q') {
+            beziers.push(new Bezier(cx, cy, cmd.x1, cmd.y1, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'Z') {
+            if (cx !== sx || cy !== sy) {
+              const mx = (cx + sx) / 2, my = (cy + sy) / 2;
+              beziers.push(new Bezier(cx, cy, mx, my, sx, sy));
+            }
+            ops.push(cmd);
+            cx = sx; cy = sy;
+          }
+        }
+        return { beziers, ops, width: font.getAdvanceWidth(text, fontSize), fontSize };
+      }
+
+      function drawOps(g, ops, color, width) {
+        g.clear();
+        for (const op of ops) {
+          if (op.type === 'M') g.moveTo(op.x, op.y);
+          else if (op.type === 'L') g.lineTo(op.x, op.y);
+          else if (op.type === 'C') g.bezierCurveTo(op.x1, op.y1, op.x2, op.y2, op.x, op.y);
+          else if (op.type === 'Q') g.quadraticCurveTo(op.x1, op.y1, op.x, op.y);
+          else if (op.type === 'Z') g.closePath();
+        }
+        g.stroke({ width, color, cap: 'round', join: 'round' });
+      }
+
+      // ---- Pixi app ----
+      const app = new Application();
+      await app.init({
+        resizeTo: window,
+        background: 0x1a1a1a,
+        antialias: true,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true,
+      });
+      document.body.appendChild(app.canvas);
+
+      // Fit SVG: ~70% width, ~55% height — whichever is the binding constraint.
+      const scale = Math.min(
+        (app.screen.width * 0.7) / vbW,
+        (app.screen.height * 0.55) / vbH
+      );
+      const svgViewX = (app.screen.width - vbW * scale) / 2 - vbX * scale;
+      const svgViewY = (app.screen.height - vbH * scale) / 2 - vbY * scale;
+
+      const svgView = new Container();
+      svgView.x = svgViewX;
+      svgView.y = svgViewY;
+      svgView.scale.set(scale);
+      const svgG = new Graphics();
+      svgView.addChild(svgG);
+      drawOps(svgG, svgOps, 0xfafafa, 18); // SVG stroke in local viewBox units; scale handles it
+      app.stage.addChild(svgView);
+
+      // Cursor text: scale font size to roughly match the SVG character height.
+      const fontSize = Math.max(48, Math.round(vbH * scale * 0.18));
+      const cursor = processText('ERYETCHEN', fontSize);
+
+      const cursorView = new Container();
+      cursorView.x = (app.screen.width - cursor.width) / 2;
+      cursorView.y = app.screen.height / 2 + fontSize / 3;
+      const cursorG = new Graphics();
+      cursorView.addChild(cursorG);
+      drawOps(cursorG, cursor.ops, 0xffb04e, 1.5);
+      app.stage.addChild(cursorView);
+
+      // Pool of reusable dot Graphics — positioned per frame, no path rebuilds.
+      const dotPool = [];
+      let activeDotCount = 0;
+
+      // ---- Serialize beziers for the worker ----
+      function beziersToFlat(beziers) {
+        return beziers.map(b => {
+          const p = b.points;
+          if (p.length === 3) return [p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y];
+          return [p[0].x, p[0].y, p[1].x, p[1].y, p[2].x, p[2].y, p[3].x, p[3].y];
+        });
+      }
+
+      // Transform SVG beziers from viewBox space into world (screen) space, then flatten.
+      function shiftScale(b, s, dx, dy) {
+        const p = b.points;
+        const out = [];
+        for (const pt of p) { out.push(pt.x * s + dx, pt.y * s + dy); }
+        return out;
+      }
+      const svgWorldPts = svgBeziers.map(b => shiftScale(b, scale, svgViewX, svgViewY));
+      const cursorLocalPts = beziersToFlat(cursor.beziers);
+
+      // ---- Worker (inline classic worker — line-segment intersection only) ----
+      const workerSrc = `
+        const N = 8;                  // tessellation level for real cubics/quadratics
+        const cellSize = 64;
+        let svgLines = null;          // Float32Array, 4 floats per segment: x0,y0,x1,y1
+        let svgLineBB = null;         // Float32Array, 4 floats per segment: xmin,ymin,xmax,ymax
+        let cursorLines = null;       // Float32Array (local space)
+        let cursorLineBB = null;      // Float32Array (local space)
+        const grid = new Map();
+        let sxMin, sxMax, syMin, syMax;
+        let cxMin, cxMax, cyMin, cyMax;
+        let visitedGen = null, gen = 0;
+
+        function tessellatePoints(pts, out) {
+          if (pts.length === 6) {
+            const x0=pts[0],y0=pts[1],xc=pts[2],yc=pts[3],x1=pts[4],y1=pts[5];
+            // Detect L-as-degenerate-quadratic (control == midpoint): emit single segment.
+            const mx=(x0+x1)*0.5, my=(y0+y1)*0.5;
+            if (Math.abs(xc-mx)<1e-6 && Math.abs(yc-my)<1e-6) {
+              out.push(x0,y0,x1,y1); return;
+            }
+            let px=x0, py=y0;
+            for (let i=1; i<=N; i++) {
+              const t=i/N, u=1-t;
+              const x=u*u*x0+2*u*t*xc+t*t*x1;
+              const y=u*u*y0+2*u*t*yc+t*t*y1;
+              out.push(px,py,x,y); px=x; py=y;
+            }
+          } else {
+            const x0=pts[0],y0=pts[1],x1=pts[2],y1=pts[3],x2=pts[4],y2=pts[5],x3=pts[6],y3=pts[7];
+            let px=x0, py=y0;
+            for (let i=1; i<=N; i++) {
+              const t=i/N, u=1-t, uu=u*u, tt=t*t;
+              const x = uu*u*x0 + 3*uu*t*x1 + 3*u*tt*x2 + tt*t*x3;
+              const y = uu*u*y0 + 3*uu*t*y1 + 3*u*tt*y2 + tt*t*y3;
+              out.push(px,py,x,y); px=x; py=y;
+            }
+          }
+        }
+
+        function tessellateAll(curvePts) {
+          const acc = [];
+          for (const pts of curvePts) tessellatePoints(pts, acc);
+          return new Float32Array(acc);
+        }
+
+        function computeBBoxes(lines) {
+          const n = lines.length / 4;
+          const bb = new Float32Array(n * 4);
+          for (let i = 0; i < n; i++) {
+            const o = i * 4;
+            const x0=lines[o], y0=lines[o+1], x1=lines[o+2], y1=lines[o+3];
+            bb[o]   = x0 < x1 ? x0 : x1;
+            bb[o+1] = y0 < y1 ? y0 : y1;
+            bb[o+2] = x0 > x1 ? x0 : x1;
+            bb[o+3] = y0 > y1 ? y0 : y1;
+          }
+          return bb;
+        }
+
+        function init(msg) {
+          svgLines = tessellateAll(msg.svgPts);
+          svgLineBB = computeBBoxes(svgLines);
+          cursorLines = tessellateAll(msg.cursorPts);
+          cursorLineBB = computeBBoxes(cursorLines);
+
+          sxMin=Infinity; sxMax=-Infinity; syMin=Infinity; syMax=-Infinity;
+          for (let i = 0; i < svgLineBB.length; i += 4) {
+            if (svgLineBB[i]   < sxMin) sxMin = svgLineBB[i];
+            if (svgLineBB[i+1] < syMin) syMin = svgLineBB[i+1];
+            if (svgLineBB[i+2] > sxMax) sxMax = svgLineBB[i+2];
+            if (svgLineBB[i+3] > syMax) syMax = svgLineBB[i+3];
+          }
+          cxMin=Infinity; cxMax=-Infinity; cyMin=Infinity; cyMax=-Infinity;
+          for (let i = 0; i < cursorLineBB.length; i += 4) {
+            if (cursorLineBB[i]   < cxMin) cxMin = cursorLineBB[i];
+            if (cursorLineBB[i+1] < cyMin) cyMin = cursorLineBB[i+1];
+            if (cursorLineBB[i+2] > cxMax) cxMax = cursorLineBB[i+2];
+            if (cursorLineBB[i+3] > cyMax) cyMax = cursorLineBB[i+3];
+          }
+
+          const nSeg = svgLineBB.length / 4;
+          for (let idx = 0; idx < nSeg; idx++) {
+            const o = idx * 4;
+            const x0 = Math.floor(svgLineBB[o]   / cellSize);
+            const x1 = Math.floor(svgLineBB[o+2] / cellSize);
+            const y0 = Math.floor(svgLineBB[o+1] / cellSize);
+            const y1 = Math.floor(svgLineBB[o+3] / cellSize);
+            for (let cx = x0; cx <= x1; cx++) {
+              for (let cy = y0; cy <= y1; cy++) {
+                const key = cx * 100000 + cy;
+                let arr = grid.get(key);
+                if (!arr) { arr = []; grid.set(key, arr); }
+                arr.push(idx);
+              }
+            }
+          }
+          visitedGen = new Uint32Array(nSeg);
+          self.postMessage({ type: 'ready' });
+        }
+
+        function query(ox, oy, frameId) {
+          const out = [];
+          if (ox + cxMax < sxMin || ox + cxMin > sxMax || oy + cyMax < syMin || oy + cyMin > syMax) {
+            const buf = new Float32Array(0);
+            self.postMessage({ type: 'result', frameId, points: buf }, [buf.buffer]);
+            return;
+          }
+          const nCursor = cursorLines.length / 4;
+          for (let j = 0; j < nCursor; j++) {
+            const o = j * 4;
+            const cx0 = cursorLines[o]   + ox, cy0 = cursorLines[o+1] + oy;
+            const cx1 = cursorLines[o+2] + ox, cy1 = cursorLines[o+3] + oy;
+            const wbXmin = cursorLineBB[o]   + ox;
+            const wbYmin = cursorLineBB[o+1] + oy;
+            const wbXmax = cursorLineBB[o+2] + ox;
+            const wbYmax = cursorLineBB[o+3] + oy;
+            const gx0 = Math.floor(wbXmin / cellSize), gx1 = Math.floor(wbXmax / cellSize);
+            const gy0 = Math.floor(wbYmin / cellSize), gy1 = Math.floor(wbYmax / cellSize);
+            gen++;
+            const dx1 = cx1 - cx0, dy1 = cy1 - cy0;
+            for (let gx = gx0; gx <= gx1; gx++) {
+              for (let gy = gy0; gy <= gy1; gy++) {
+                const arr = grid.get(gx * 100000 + gy);
+                if (!arr) continue;
+                for (let k = 0; k < arr.length; k++) {
+                  const i = arr[k];
+                  if (visitedGen[i] === gen) continue;
+                  visitedGen[i] = gen;
+                  const so = i * 4;
+                  if (svgLineBB[so+2] < wbXmin || svgLineBB[so]   > wbXmax ||
+                      svgLineBB[so+3] < wbYmin || svgLineBB[so+1] > wbYmax) continue;
+                  const sx0 = svgLines[so], sy0 = svgLines[so+1];
+                  const sx1 = svgLines[so+2], sy1 = svgLines[so+3];
+                  const dx2 = sx1 - sx0, dy2 = sy1 - sy0;
+                  const denom = dx1 * dy2 - dy1 * dx2;
+                  if (denom === 0) continue;
+                  const ddx = sx0 - cx0, ddy = sy0 - cy0;
+                  const t = (ddx * dy2 - ddy * dx2) / denom;
+                  if (t < 0 || t > 1) continue;
+                  const s = (ddx * dy1 - ddy * dx1) / denom;
+                  if (s < 0 || s > 1) continue;
+                  out.push(cx0 + t * dx1, cy0 + t * dy1);
+                }
+              }
+            }
+          }
+          const buf = new Float32Array(out);
+          self.postMessage({ type: 'result', frameId, points: buf }, [buf.buffer]);
+        }
+
+        self.onmessage = (e) => {
+          const msg = e.data;
+          if (msg.type === 'init') init(msg);
+          else if (msg.type === 'query') query(msg.ox, msg.oy, msg.frameId);
+        };
+      `;
+      const workerUrl = URL.createObjectURL(new Blob([workerSrc], { type: 'application/javascript' }));
+      const worker = new Worker(workerUrl);
+
+      let workerReady = false;
+      let queryId = 0;
+      let inFlight = false;
+      let pendingPos = null;
+
+      worker.onmessage = (e) => {
+        const msg = e.data;
+        if (msg.type === 'ready') {
+          workerReady = true;
+          sendQuery(cursorView.x, cursorView.y);
+        } else if (msg.type === 'result') {
+          inFlight = false;
+          drawDots(msg.points);
+          if (pendingPos) {
+            const p = pendingPos;
+            pendingPos = null;
+            sendQuery(p.ox, p.oy);
+          }
+        }
+      };
+
+      worker.postMessage({ type: 'init', svgPts: svgWorldPts, cursorPts: cursorLocalPts });
+
+      function drawDots(pts) {
+        const count = pts.length / 2;
+        while (dotPool.length < count) {
+          const g = new Graphics();
+          g.circle(0, 0, 4).fill(0xff3355).stroke({ width: 1, color: 0xffffff });
+          g.visible = false;
+          app.stage.addChild(g);
+          dotPool.push(g);
+        }
+        for (let i = 0; i < count; i++) {
+          const d = dotPool[i];
+          d.x = pts[i * 2];
+          d.y = pts[i * 2 + 1];
+          d.visible = true;
+        }
+        for (let i = count; i < activeDotCount; i++) dotPool[i].visible = false;
+        activeDotCount = count;
+      }
+
+      function sendQuery(ox, oy) {
+        if (!workerReady) return;
+        if (inFlight) { pendingPos = { ox, oy }; return; }
+        inFlight = true;
+        queryId++;
+        worker.postMessage({ type: 'query', ox, oy, frameId: queryId });
+      }
+
+      app.stage.eventMode = 'static';
+      app.stage.hitArea = app.screen;
+      app.stage.on('pointermove', e => {
+        cursorView.x = e.global.x - cursor.width / 2;
+        cursorView.y = e.global.y + fontSize / 3;
+        sendQuery(cursorView.x, cursorView.y);
+      });
+    } catch (e) {
+      showErr('Failed to init: ' + e.message + '\n' + (e.stack || ''));
+    }
+  </script>
+</body>
+</html>

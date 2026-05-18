@@ -1,0 +1,188 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>ERYET ∩ CHEN — Path Intersections</title>
+  <style>
+    html, body { margin: 0; height: 100%; background: #1a1a1a; overflow: hidden; font-family: system-ui, sans-serif; cursor: none; }
+    canvas { display: block; position: fixed; inset: 0; width: 100vw !important; height: 100vh !important; }
+    #hint { position: fixed; top: 10px; left: 12px; color: #aaa; font-size: 13px; pointer-events: none; z-index: 10; }
+    #err {
+      position: fixed; bottom: 0; left: 0; right: 0;
+      color: #f88; font: 12px/1.4 monospace; padding: 8px;
+      white-space: pre-wrap; background: rgba(40,0,0,0.9);
+      max-height: 240px; overflow: auto; z-index: 100;
+    }
+    #err:empty { display: none; }
+  </style>
+</head>
+<body>
+  <div id="hint">Move your mouse — red dots mark where ERYET ∩ CHEN.</div>
+  <div id="err"></div>
+
+  <script src="https://cdn.jsdelivr.net/npm/pixi.js@8.6.6/dist/pixi.min.js"></script>
+
+  <script type="module">
+    const errEl = document.getElementById('err');
+    const showErr = msg => { errEl.textContent += msg + '\n'; console.error(msg); };
+    window.addEventListener('error', e => showErr('Error: ' + (e.message || e.error)));
+    window.addEventListener('unhandledrejection', e => showErr('Rejection: ' + (e.reason?.stack || e.reason)));
+
+    try {
+      if (!window.PIXI) throw new Error('PIXI not loaded');
+      const { Application, Graphics, Container } = window.PIXI;
+
+      const bjMod = await import('https://cdn.jsdelivr.net/npm/bezier-js@6.1.4/+esm');
+      const Bezier = bjMod.Bezier || bjMod.default?.Bezier || bjMod.default;
+      if (typeof Bezier !== 'function') throw new Error('Bezier not found');
+
+      const otMod = await import('https://cdn.jsdelivr.net/npm/opentype.js@1.3.4/+esm');
+      const opentype = otMod.default || otMod;
+
+      const fontUrl = 'https://cdn.jsdelivr.net/gh/opentypejs/opentype.js/fonts/Roboto-Black.ttf';
+      const font = await new Promise((res, rej) => {
+        opentype.load(fontUrl, (err, f) => err ? rej(err) : res(f));
+      });
+      console.log('font loaded:', font.names?.fullName?.en);
+
+      const app = new Application();
+      await app.init({
+        resizeTo: window,
+        background: 0x1a1a1a,
+        antialias: true,
+        resolution: window.devicePixelRatio || 1,
+        autoDensity: true,
+      });
+      document.body.appendChild(app.canvas);
+
+      // ---- Convert text -> {pixi render ops, bezier-js curves} ----
+      function processText(text, fontSize) {
+        const path = font.getPath(text, 0, 0, fontSize);
+        const beziers = [];
+        const ops = [];
+        let cx = 0, cy = 0, sx = 0, sy = 0;
+        for (const cmd of path.commands) {
+          if (cmd.type === 'M') {
+            cx = sx = cmd.x; cy = sy = cmd.y;
+            ops.push(cmd);
+          } else if (cmd.type === 'L') {
+            const mx = (cx + cmd.x) / 2, my = (cy + cmd.y) / 2;
+            beziers.push(new Bezier(cx, cy, mx, my, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'C') {
+            beziers.push(new Bezier(cx, cy, cmd.x1, cmd.y1, cmd.x2, cmd.y2, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'Q') {
+            beziers.push(new Bezier(cx, cy, cmd.x1, cmd.y1, cmd.x, cmd.y));
+            ops.push(cmd);
+            cx = cmd.x; cy = cmd.y;
+          } else if (cmd.type === 'Z') {
+            if (cx !== sx || cy !== sy) {
+              const mx = (cx + sx) / 2, my = (cy + sy) / 2;
+              beziers.push(new Bezier(cx, cy, mx, my, sx, sy));
+            }
+            ops.push(cmd);
+            cx = sx; cy = sy;
+          }
+        }
+        return { beziers, ops, width: font.getAdvanceWidth(text, fontSize), fontSize };
+      }
+
+      function drawText(g, ops, color) {
+        g.clear();
+        for (const op of ops) {
+          if (op.type === 'M') g.moveTo(op.x, op.y);
+          else if (op.type === 'L') g.lineTo(op.x, op.y);
+          else if (op.type === 'C') g.bezierCurveTo(op.x1, op.y1, op.x2, op.y2, op.x, op.y);
+          else if (op.type === 'Q') g.quadraticCurveTo(op.x1, op.y1, op.x, op.y);
+          else if (op.type === 'Z') g.closePath();
+        }
+        g.stroke({ width: 1.5, color });
+      }
+
+      const fontSize = 200;
+      const eryet = processText('ERYET', fontSize);
+      const chen = processText('CHEN', fontSize);
+
+      // ---- Render ----
+      // Static ERYET, centered.
+      const eryetView = new Container();
+      eryetView.x = (app.screen.width - eryet.width) / 2;
+      eryetView.y = app.screen.height / 2 + fontSize / 3;
+      const eryetG = new Graphics();
+      eryetView.addChild(eryetG);
+      drawText(eryetG, eryet.ops, 0x4ea1ff);
+      app.stage.addChild(eryetView);
+
+      // CHEN follows cursor.
+      const chenView = new Container();
+      chenView.x = (app.screen.width - chen.width) / 2;
+      chenView.y = app.screen.height / 2 + fontSize / 3;
+      const chenG = new Graphics();
+      chenView.addChild(chenG);
+      drawText(chenG, chen.ops, 0xffb04e);
+      app.stage.addChild(chenView);
+
+      const dots = new Graphics();
+      app.stage.addChild(dots);
+
+      // ---- Intersection math ----
+      function shiftedBezier(b, dx, dy) {
+        const p = b.points;
+        if (p.length === 3) {
+          return new Bezier(p[0].x + dx, p[0].y + dy, p[1].x + dx, p[1].y + dy, p[2].x + dx, p[2].y + dy);
+        }
+        return new Bezier(p[0].x + dx, p[0].y + dy, p[1].x + dx, p[1].y + dy, p[2].x + dx, p[2].y + dy, p[3].x + dx, p[3].y + dy);
+      }
+
+      function bboxOverlap(a, b) {
+        return a.x.max >= b.x.min && a.x.min <= b.x.max
+            && a.y.max >= b.y.min && a.y.min <= b.y.max;
+      }
+
+      // ERYET is static — compute its world-space curves and bboxes once.
+      const eryetWorld = eryet.beziers.map(b => shiftedBezier(b, eryetView.x, eryetView.y));
+      const eryetBB = eryetWorld.map(b => b.bbox());
+
+      function redraw() {
+        dots.clear();
+        const chenWorld = chen.beziers.map(b => shiftedBezier(b, chenView.x, chenView.y));
+        const chenBB = chenWorld.map(b => b.bbox());
+        for (let i = 0; i < eryetWorld.length; i++) {
+          for (let j = 0; j < chenWorld.length; j++) {
+            if (!bboxOverlap(eryetBB[i], chenBB[j])) continue;
+            const hits = eryetWorld[i].intersects(chenWorld[j]);
+            for (const hit of hits) {
+              const t = parseFloat(hit.split('/')[0]);
+              const pt = eryetWorld[i].get(t);
+              dots.circle(pt.x, pt.y, 4).fill(0xff3355).stroke({ width: 1, color: 0xffffff });
+            }
+          }
+        }
+      }
+
+      let pending = false;
+      function scheduleRedraw() {
+        if (pending) return;
+        pending = true;
+        requestAnimationFrame(() => { pending = false; redraw(); });
+      }
+
+      // ---- Cursor tracking ----
+      app.stage.eventMode = 'static';
+      app.stage.hitArea = app.screen;
+      app.stage.on('pointermove', e => {
+        chenView.x = e.global.x - chen.width / 2;
+        chenView.y = e.global.y + fontSize / 3;
+        scheduleRedraw();
+      });
+
+      redraw();
+    } catch (e) {
+      showErr('Failed to init: ' + e.message + '\n' + (e.stack || ''));
+    }
+  </script>
+</body>
+</html>
