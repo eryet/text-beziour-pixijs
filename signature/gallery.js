@@ -35,7 +35,7 @@ module.exports = variants => `<!doctype html>
 </header>
 <main>
 ${variants.map(v => `  <section class="card${v.id === 'vertical' ? ' tall' : ''}">
-    <div class="art"><img src="${v.id}.svg" alt="${esc(v.name)} signature"></div>
+    <div class="art"${v.bg ? ` style="background:${v.bg}"` : ''}><img src="${v.id}.svg" alt="${esc(v.name)} signature"></div>
     <div class="meta"><div><h2>${esc(v.name)}</h2><code>signature/variants/${v.id}.svg</code><p>${esc(v.note)}</p></div><button class="replay">replay</button></div>
   </section>`).join('\n')}
 </main>

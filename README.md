@@ -16,7 +16,7 @@ Path-intersection demos built with [Pixi.js](https://pixijs.com/) v8 — a Pixi 
 
 - **`chen-signature.svg`** / **`chen-signature-light.svg`**: 陳偉洺 as an artist-style brush signature (running-cursive strokes, dry-brush streaks, red 陳 seal) with a draw-on animation. Dark ink is for light backgrounds; light ink is for dark ones.
 - Generated from stroke data in `signature/design.js`: `node signature/make-signature.js` (add `--static` for no animation, `--debug` to plot the control points).
-- Style variants (classic, one-stroke, vertical, bold, pen, clean) are defined in `signature/variants.js`. Build them with `node signature/make-signature.js --variants` and compare them in `signature/variants/index.html`.
+- Style variants (classic, one-stroke, vertical, bold, pen, clean, ensō, gold leaf, ink wash, vermilion, neon, stamp mark) are defined in `signature/variants.js`. Build them with `node signature/make-signature.js --variants` and compare them in `signature/variants/index.html`.
 
 ## Run
 

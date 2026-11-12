@@ -181,7 +181,7 @@ function generate(D, { ink, animate, debug }) {
         a[3] = 'k'; b[3] = 'k';
         prev.pts.push([m[0], m[1], st.join.p ?? 0.04, undefined, -1], ...pts);
         prev.dry.push(...dry);
-      } else strokes.push({ pts, dry, char: ch.name, noEntry: st.noEntry });
+      } else strokes.push({ pts, dry, char: ch.name, noEntry: st.noEntry, w: st.w });
     }
   }
   // brush entry (起筆) and end press (收筆)
@@ -210,7 +210,7 @@ function generate(D, { ink, animate, debug }) {
     let maxW = 0;
     for (const pc of pieces) {
       if (pc.length < 2) continue;
-      const s = samplePiece(pc), w = widths(s, B), pieceSid = pc[1][4];
+      const s = samplePiece(pc), w = widths(s, st.w ? { ...B, W: B.W * st.w } : B), pieceSid = pc[1][4];
       w.forEach((v, i) => { maxW = Math.max(maxW, v); ext(s[i].x, s[i].y, v / 2 + 4); });
       const [a1, a2, l1, l2] = B.edge, nz = [0, 1, 2, 3].map(() => noise1d(noiseSeed++));
       let acc = 0; const arc = s.map((q, i) => (acc += i ? Math.hypot(q.x - s[i - 1].x, q.y - s[i - 1].y) : 0));
@@ -245,6 +245,8 @@ function generate(D, { ink, animate, debug }) {
   // a seal with `at: {char, pt}` is anchored to a point in that character's local box, so it follows the layout
   const seals = (D.seals || []).map(S => { if (!S.at) return S; const [x, y] = xf(D.chars[S.at.char].t)(S.at.pt); return { ...S, x, y }; });
   for (const S of seals) { ext(S.x, S.y); ext(S.x + S.w, S.y + S.h); }
+  let backdrop = null; // optional block behind the ink, e.g. a red seal the signature is cut out of
+  if (D.backdrop) { const p = D.backdrop.pad; backdrop = [bbox[0] - p, bbox[1] - p, bbox[2] + p, bbox[3] + p]; ext(backdrop[0], backdrop[1]); ext(backdrop[2], backdrop[3]); }
 
   // 3. timing: strokes in writing order, a short pause between characters
   let t = A.start, prevChar = null;
@@ -267,13 +269,14 @@ function generate(D, { ink, animate, debug }) {
 
   built.forEach((b, i) => {
     const d = b.polys.map(polyD).join('');
-    if (!animate) { body += `<path d="${d}"/>\n`; return; }
+    const tone = B.tones ? ` fill-opacity="${B.tones[i % B.tones.length]}"` : ''; // per-stroke ink density
+    if (!animate) { body += `<path d="${d}"${tone}/>\n`; return; }
     // reveal mask: a thick centerline whose dash grows along the stroke
     const r = b.maxW / 2 + 4, L = b.L.toFixed(1);
     const hide = (b.L + r + 2).toFixed(1), gapLen = (b.L + 2 * r + 20).toFixed(1);
     defs += `<mask id="m${i}" maskUnits="userSpaceOnUse" ${region}><path class="r${i}" d="${lineD(b.cl)}" fill="none" stroke="#fff" stroke-width="${(2 * r).toFixed(1)}" stroke-linecap="round" stroke-linejoin="round" stroke-dasharray="${L} ${gapLen}"/></mask>\n`;
     css += `@keyframes k${i}{from{stroke-dashoffset:${hide}}to{stroke-dashoffset:0}} .r${i}{stroke-dashoffset:0;animation:k${i} ${timing[i].dur.toFixed(3)}s ${A.ease} ${timing[i].delay.toFixed(3)}s both}\n`;
-    body += `<path d="${d}" mask="url(#m${i})"/>\n`;
+    body += `<path d="${d}"${tone} mask="url(#m${i})"/>\n`;
   });
 
   let sealBody = '';
@@ -287,12 +290,30 @@ function generate(D, { ink, animate, debug }) {
     st.pts.forEach((p, i) => { dbg += `<circle cx="${f1(p[0])}" cy="${f1(p[1])}" r="${p[3] === 'k' ? 7 : 5}" fill="${p[3] === 'k' ? '#06f' : '#e33'}"/><text x="${f1(p[0] + 8)}" y="${f1(p[1] - 6)}" font-size="22" fill="#06f">${p[4]}.${i}</text>`; });
   }
 
+  // optional effects from the design: extra defs, ink paint/filter, and an overlay drawn over the ink
+  const fx = D.fx || {}, ctx = { vb, region, end: t, animate, ink, hasDry: allDry.length > 0 };
+  if (fx.defs) defs += fx.defs(ctx);
+  let back = '';
+  if (backdrop) {
+    const K = D.backdrop, [x0, y0, x1, y1] = backdrop;
+    defs += `<filter id="backTex" filterUnits="userSpaceOnUse" ${region}>
+  <feTurbulence type="fractalNoise" baseFrequency="${K.wearFreq}" numOctaves="3" seed="21" result="n"/>
+  <feColorMatrix in="n" type="matrix" values="0 0 0 0 0  0 0 0 0 0  0 0 0 0 0  0 0 0 -22 ${K.wearCut}" result="holes"/>
+  <feComposite in="SourceGraphic" in2="holes" operator="in" result="worn"/>
+  <feTurbulence type="fractalNoise" baseFrequency="0.012" numOctaves="2" seed="5" result="n2"/>
+  <feDisplacementMap in="worn" in2="n2" scale="${K.edge}" xChannelSelector="R" yChannelSelector="G"/>
+</filter>\n`;
+    if (animate) css += `@keyframes bdIn{from{opacity:0}to{opacity:1}} .bd{animation:bdIn .35s ease-out both}\n`;
+    back = `<g class="bd" filter="url(#backTex)"><rect x="${f1(x0)}" y="${f1(y0)}" width="${f1(x1 - x0)}" height="${f1(y1 - y0)}" rx="${K.rx}" fill="${K.color}"/></g>\n`;
+  }
+
   return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="${vb.join(' ')}" width="${Math.round(vb[2] * D.displayScale)}">
 <title>${D.title}</title>
 ${css ? `<style>\n${css}</style>\n` : ''}<defs>
 ${defs}</defs>
-<g${allDry.length ? ' mask="url(#dry)"' : ''} fill="${ink}" fill-opacity="${B.opacity}">
-${body}</g>
+${back}<g${allDry.length ? ' mask="url(#dry)"' : ''}${fx.inkFilter ? ` filter="${fx.inkFilter}"` : ''} fill="${fx.inkFill || ink}" fill-opacity="${B.opacity}"><g id="ink">
+${body}</g></g>
+${fx.overlay ? fx.overlay(ctx) : ''}
 ${sealBody}
 ${dbg}</svg>
 `;

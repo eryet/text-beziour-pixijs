@@ -39,7 +39,7 @@ const ONE_STROKE = [
 
 // ---------- variants ----------
 const variants = [];
-const add = (id, name, note, make) => { const D = clone(base); make(D); variants.push({ id, name, note, design: D }); };
+const add = (id, name, note, make, opts = {}) => { const D = clone(base); make(D); variants.push({ id, name, note, design: D, ...opts }); };
 
 add('classic', '行草 Classic', 'Running-cursive brush strokes, sweeping underline, 白文 陳 seal. The current chen-signature.svg.', () => {});
 
@@ -83,6 +83,86 @@ add('clean', '簡約 Clean', 'Calmer and more level, no underline or dry-brush, 
   D.brush = { ...D.brush, minW: 4.5 };
   eachChar(D, c => { c.t.rot = -1.5; c.t.skew = -6; });
   D.seals = [seal.weiMing([1080, 480], 125, 0)];
+});
+
+// ---------- creative variants ----------
+add('enso', '圓相 Ensō', 'The name inside a single Zen brush circle, drawn last in one breath and trailing off in dry brush.', D => {
+  noFlourish(D);
+  noDry(D);
+  const s = 0.6, k = s / 0.92;
+  D.brush = { ...D.brush, W: 54, minW: 5 }; // finer brush for the smaller name
+  D.chars.forEach(c => { c.t = { ...c.t, s, x: c.t.x * k, y: c.t.y * k }; });
+  const cx = 790, cy = 330, R = 1000, pts = [];
+  for (let a = 150; a <= 492; a += 12) { // clockwise from lower-left, leaving a small gap
+    const r = a * Math.PI / 180, u = (a - 150) / 342;
+    const rad = R * (1 + 0.03 * Math.sin(r * 2.3) + 0.015 * Math.sin(r * 5));
+    const p = u < 0.08 ? 0.75 + u * 3 : u < 0.6 ? 1 - 0.15 * Math.sin(u * 9) : Math.max(0.06, 1 - (u - 0.6) * 2.3);
+    pts.push([cx + Math.cos(r) * rad, cy + Math.sin(r) * rad * 0.97, +p.toFixed(3)]);
+  }
+  D.chars.push({ name: '圓', t: { s: 1, x: 0, y: 0 }, strokes: [{ pts, w: 2.5, dry: [0.5, 1, 10] }] });
+  D.seals = [{ ...seal.chen([0, 0], 210, -4), at: { char: 3, pt: [cx + 830, cy + 690] } }];
+  D.anim.charGap = 0.25;
+});
+
+const GOLD = [[0, '#9a6f24'], [0.16, '#f3d77e'], [0.3, '#b8862b'], [0.46, '#fbecb0'], [0.62, '#c09032'], [0.8, '#f1d27a'], [1, '#8f6620']];
+add('gold', '泥金 Gold leaf', 'Gold ink on black with a bolder brush; a light sweeps across the letters once the signature is written.', D => {
+  D.brush = { ...D.brush, W: 88, opacity: 1 };
+  D.fx = {
+    defs: ({ vb: [x, y, w, h], end, animate }) =>
+      `<linearGradient id="gold" gradientUnits="userSpaceOnUse" x1="${x}" y1="${y}" x2="${x + w}" y2="${y + h}">${GOLD.map(([o, c]) => `<stop offset="${o}" stop-color="${c}"/>`).join('')}</linearGradient>\n` +
+      (animate ? `<linearGradient id="shine" gradientUnits="userSpaceOnUse" x1="${x}" y1="${y}" x2="${x + w * 0.3}" y2="${y + h}" gradientTransform="translate(${-w} 0)">
+  <stop offset="0" stop-color="#fffbe6" stop-opacity="0"/><stop offset=".5" stop-color="#fffbe6" stop-opacity=".95"/><stop offset="1" stop-color="#fffbe6" stop-opacity="0"/>
+  <animateTransform attributeName="gradientTransform" type="translate" from="${-w} 0" to="${w * 1.3} 0" begin="${(end + 0.3).toFixed(2)}s" dur="1.6s" fill="freeze"/>
+</linearGradient>\n` : ''),
+    inkFill: 'url(#gold)',
+    overlay: ({ animate, hasDry }) => animate ? `<use href="#ink" fill="url(#shine)"${hasDry ? ' mask="url(#dry)"' : ''}/>` : '',
+  };
+}, { bg: '#141210' });
+
+add('inkwash', '水墨 Ink wash', 'Wet ink soaking into rice paper: soft feathered edges and strokes in different ink densities.', D => {
+  D.brush = { ...D.brush, opacity: 1, tones: [0.95, 0.72, 0.9, 0.62, 0.85, 0.78, 0.68] };
+  D.fx = {
+    defs: ({ region, ink }) => `<filter id="bleed" filterUnits="userSpaceOnUse" ${region} color-interpolation-filters="sRGB">
+  <feMorphology in="SourceAlpha" operator="dilate" radius="3" result="d"/>
+  <feTurbulence type="fractalNoise" baseFrequency="0.03" numOctaves="3" seed="3" result="n"/>
+  <feDisplacementMap in="d" in2="n" scale="22" xChannelSelector="R" yChannelSelector="G" result="dd"/>
+  <feGaussianBlur in="dd" stdDeviation="7" result="b"/>
+  <feFlood flood-color="${ink}" flood-opacity="0.3"/>
+  <feComposite in2="b" operator="in" result="halo"/>
+  <feMerge><feMergeNode in="halo"/><feMergeNode in="SourceGraphic"/></feMerge>
+</filter>\n`,
+    inkFilter: 'url(#bleed)',
+  };
+});
+
+add('vermilion', '朱砂 Vermilion', 'Cinnabar-red ink, the colour of imperial annotations, with the seal reversed to black.', D => {
+  D.ink = { ...D.ink, dark: '#b3301f' };
+  D.seals = [{ ...seal.chen([1200, 840], 240), color: '#1d1a17' }];
+});
+
+add('neon', '霓虹 Neon', 'One continuous line of light, like a long-exposure light painting, with a round neon seal.', D => {
+  joinAll(D, ONE_STROKE);
+  noDry(D);
+  D.ink = { ...D.ink, dark: '#53eaff' };
+  D.brush = { ...D.brush, W: 30, K: 0.12, minW: 4, opacity: 1, edge: [0, 0, 40, 10], entry: false, exit: false };
+  D.anim = { ...D.anim, speed: 8000, charGap: 0 };
+  D.seals = [{ ...seal.round([1250, 900], 215), color: '#ff5ccf', wearCut: 40, edge: 0 }];
+  D.fx = {
+    defs: ({ region }) => `<filter id="glow" filterUnits="userSpaceOnUse" ${region} color-interpolation-filters="sRGB">
+  <feGaussianBlur in="SourceGraphic" stdDeviation="26" result="b2"/>
+  <feGaussianBlur in="SourceGraphic" stdDeviation="8" result="b1"/>
+  <feColorMatrix in="SourceGraphic" type="matrix" values="0.35 0 0 0 0.65  0 0.35 0 0 0.65  0 0 0.35 0 0.65  0 0 0 1 0" result="core"/>
+  <feMerge><feMergeNode in="b2"/><feMergeNode in="b2"/><feMergeNode in="b1"/><feMergeNode in="b1"/><feMergeNode in="core"/></feMerge>
+</filter>\n`,
+    inkFilter: 'url(#glow)',
+  };
+}, { bg: '#0d0f1c' });
+
+add('stamp', '朱印 Stamp mark', 'The whole signature cut out of a red seal block, usable as a personal logo or chop.', D => {
+  D.ink = { ...D.ink, dark: '#f6efe0' };
+  D.brush = { ...D.brush, W: 90, opacity: 1 };
+  D.seals = [];
+  D.backdrop = { color: '#b5281f', pad: 90, rx: 40, wearFreq: 0.045, wearCut: 17.1, edge: 10 };
 });
 
 module.exports = variants;
